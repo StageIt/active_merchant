@@ -23,7 +23,6 @@ module ActiveMerchant #:nodoc:
       end
 
       def initialize(options = {})
-        requires!(options, :login, :password)
         super
       end
 
@@ -99,6 +98,16 @@ module ActiveMerchant #:nodoc:
         add_merchant_defined_fields(post, options)
 
         commit("add_customer", post)
+      end
+
+      def delete_stored(customer_vault_id, options = {})
+        post = {}
+
+        add_payment_method(post, customer_vault_id, options)
+        add_customer_data(post, options)
+        add_merchant_defined_fields(post, options)
+
+        commit("delete_customer", post)
       end
 
       def verify_credentials
@@ -215,9 +224,15 @@ module ActiveMerchant #:nodoc:
 
       def commit(action, params)
 
-        params[action == "add_customer" ? :customer_vault : :type] = action
-        params[:username] = @options[:login]
-        params[:password] = @options[:password]
+        is_customer_vault_action = action == "add_customer" || action == "delete_customer"
+        params[is_customer_vault_action ? :customer_vault : :type] = action
+
+        if @options[:security_key]
+          params[:security_key] = @options[:security_key]
+        else
+          params[:username] = @options[:login]
+          params[:password] = @options[:password]
+        end
 
         raw_response = ssl_post(url, post_data(action, params), headers)
         response = parse(raw_response)
