@@ -234,6 +234,10 @@ module ActiveMerchant #:nodoc:
           params[:password] = @options[:password]
         end
 
+        if test?
+          params[:test_mode] = 'enabled'
+        end
+
         raw_response = ssl_post(url, post_data(action, params), headers)
         response = parse(raw_response)
         succeeded = success_from(response)
