@@ -98,6 +98,7 @@ module ActiveMerchant #:nodoc:
         add_payment_method(post, payment_method, options)
         add_customer_data(post, options)
         add_merchant_defined_fields(post, options)
+        post[:source_transaction_id] = options[:source_transaction_id] if options[:source_transaction_id]
 
         commit("add_customer", post)
       end
