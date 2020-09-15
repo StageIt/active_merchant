@@ -34,6 +34,10 @@ module ActiveMerchant #:nodoc:
         add_customer_data(post, options)
         add_merchant_defined_fields(post, options)
 
+        if options[:store_to_vault]
+          params[:customer_vault] = "add_customer"
+        end
+
         commit("sale", post)
       end
 
@@ -260,10 +264,6 @@ module ActiveMerchant #:nodoc:
 
         is_customer_vault_action = action == "add_customer" || action == "delete_customer"
         params[is_customer_vault_action ? :customer_vault : :type] = action
-
-        if options[:store_to_vault]
-          params[:customer_vault] = "add_customer"
-        end
 
         if @options[:security_key]
           params[:security_key] = @options[:security_key]
