@@ -35,7 +35,7 @@ module ActiveMerchant #:nodoc:
         add_merchant_defined_fields(post, options)
 
         if options[:store_to_vault]
-          params[:customer_vault] = "add_customer"
+          post[:customer_vault] = "add_customer"
         end
 
         commit("sale", post)
