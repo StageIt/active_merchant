@@ -33,6 +33,10 @@ module ActiveMerchant #:nodoc:
         add_customer_data(post, options)
         add_merchant_defined_fields(post, options)
 
+        if options[:store_to_vault]
+          post[:customer_vault] = "add_customer"
+        end
+
         commit("sale", post)
       end
 
