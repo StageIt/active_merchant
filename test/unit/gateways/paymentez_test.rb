@@ -1,9 +1,18 @@
 require 'test_helper'
 
 class PaymentezTest < Test::Unit::TestCase
+  include CommStub
+
   def setup
     @gateway = PaymentezGateway.new(application_code: 'foo', app_key: 'bar')
     @credit_card = credit_card
+    @elo_credit_card = credit_card('6362970000457013',
+      month: 10,
+      year: 2020,
+      first_name: 'John',
+      last_name: 'Smith',
+      verification_value: '737',
+      brand: 'elo')
     @amount = 100
 
     @options = {
@@ -12,6 +21,29 @@ class PaymentezTest < Test::Unit::TestCase
       billing_address: address,
       description: 'Store Purchase',
       email: 'a@b.com'
+    }
+
+    @cavv = 'example-cavv-value'
+    @xid = 'three-ds-v1-trans-id'
+    @eci = '01'
+    @three_ds_v1_version = '1.0.2'
+    @three_ds_v2_version = '2.1.0'
+    @three_ds_server_trans_id = 'three-ds-v2-trans-id'
+    @authentication_response_status = 'Y'
+
+    @three_ds_v1_mpi = {
+      cavv: @cavv,
+      eci: @eci,
+      version: @three_ds_v1_version,
+      xid: @xid
+    }
+
+    @three_ds_v2_mpi = {
+      cavv: @cavv,
+      eci: @eci,
+      version: @three_ds_v2_version,
+      three_ds_server_trans_id: @three_ds_server_trans_id,
+      authentication_response_status: @authentication_response_status
     }
   end
 
@@ -25,6 +57,16 @@ class PaymentezTest < Test::Unit::TestCase
     assert response.test?
   end
 
+  def test_successful_purchase_with_elo
+    @gateway.expects(:ssl_post).returns(successful_purchase_with_elo_response)
+
+    response = @gateway.purchase(@amount, @elo_credit_card, @options)
+    assert_success response
+
+    assert_equal 'CI-14952', response.authorization
+    assert response.test?
+  end
+
   def test_successful_purchase_with_token
     @gateway.expects(:ssl_post).returns(successful_purchase_response)
 
@@ -35,6 +77,41 @@ class PaymentezTest < Test::Unit::TestCase
     assert response.test?
   end
 
+  def test_purchase_3ds1_mpi_fields
+    @options[:three_d_secure] = @three_ds_v1_mpi
+
+    expected_auth_data = {
+      cavv: @cavv,
+      xid: @xid,
+      eci: @eci,
+      version: @three_ds_v1_version
+    }
+
+    @gateway.expects(:commit_transaction).with do |_, post_data|
+      post_data['extra_params'][:auth_data] == expected_auth_data
+    end
+
+    @gateway.purchase(@amount, @credit_card, @options)
+  end
+
+  def test_purchase_3ds2_mpi_fields
+    @options[:three_d_secure] = @three_ds_v2_mpi
+
+    expected_auth_data = {
+      cavv: @cavv,
+      eci: @eci,
+      version: @three_ds_v2_version,
+      reference_id: @three_ds_server_trans_id,
+      status: @authentication_response_status
+    }
+
+    @gateway.expects(:commit_transaction).with() do |_, post_data|
+      post_data['extra_params'][:auth_data] == expected_auth_data
+    end
+
+    @gateway.purchase(@amount, @credit_card, @options)
+  end
+
   def test_failed_purchase
     @gateway.expects(:ssl_post).returns(failed_purchase_response)
 
@@ -43,12 +120,30 @@ class PaymentezTest < Test::Unit::TestCase
     assert_equal Gateway::STANDARD_ERROR_CODE[:card_declined], response.error_code
   end
 
+  def test_expired_card
+    @gateway.expects(:ssl_post).returns(expired_card_response)
+
+    response = @gateway.purchase(@amount, @credit_card, @options)
+    assert_failure response
+    assert_equal Gateway::STANDARD_ERROR_CODE[:card_declined], response.error_code
+    assert_equal 'Expired card', response.message
+  end
+
   def test_successful_authorize
-    @gateway.stubs(:ssl_post).returns(successful_store_response, successful_authorize_response)
+    @gateway.stubs(:ssl_post).returns(successful_authorize_response)
 
     response = @gateway.authorize(@amount, @credit_card, @options)
     assert_success response
     assert_equal 'CI-635', response.authorization
+    assert response.test?
+  end
+
+  def test_successful_authorize_with_elo
+    @gateway.stubs(:ssl_post).returns(successful_authorize_with_elo_response)
+
+    response = @gateway.authorize(@amount, @elo_credit_card, @options)
+    assert_success response
+    assert_equal 'CI-14953', response.authorization
     assert response.test?
   end
 
@@ -61,8 +156,43 @@ class PaymentezTest < Test::Unit::TestCase
     assert response.test?
   end
 
+  def test_authorize_3ds1_mpi_fields
+    @options[:three_d_secure] = @three_ds_v1_mpi
+
+    expected_auth_data = {
+      cavv: @cavv,
+      xid: @xid,
+      eci: @eci,
+      version: @three_ds_v1_version
+    }
+
+    @gateway.expects(:commit_transaction).with() do |_, post_data|
+      post_data['extra_params'][:auth_data] == expected_auth_data
+    end
+
+    @gateway.authorize(@amount, @credit_card, @options)
+  end
+
+  def test_authorize_3ds2_mpi_fields
+    @options[:three_d_secure] = @three_ds_v2_mpi
+
+    expected_auth_data = {
+      cavv: @cavv,
+      eci: @eci,
+      version: @three_ds_v2_version,
+      reference_id: @three_ds_server_trans_id,
+      status: @authentication_response_status
+    }
+
+    @gateway.expects(:commit_transaction).with() do |_, post_data|
+      post_data['extra_params'][:auth_data] == expected_auth_data
+    end
+
+    @gateway.authorize(@amount, @credit_card, @options)
+  end
+
   def test_failed_authorize
-    @gateway.expects(:ssl_post).returns(failed_store_response)
+    @gateway.expects(:ssl_post).returns(failed_authorize_response)
 
     response = @gateway.authorize(@amount, @credit_card, @options)
     assert_failure response
@@ -72,7 +202,25 @@ class PaymentezTest < Test::Unit::TestCase
   def test_successful_capture
     @gateway.expects(:ssl_post).returns(successful_capture_response)
 
-    response = @gateway.capture(@amount, '1234', @options)
+    response = @gateway.capture(nil, '1234', @options)
+    assert_success response
+    assert_equal 'CI-635', response.authorization
+    assert response.test?
+  end
+
+  def test_successful_capture_with_elo
+    @gateway.expects(:ssl_post).returns(successful_capture_with_elo_response)
+
+    response = @gateway.capture(nil, '1234', @options)
+    assert_success response
+    assert_equal 'CI-14953', response.authorization
+    assert response.test?
+  end
+
+  def test_successful_capture_with_amount
+    @gateway.expects(:ssl_post).returns(successful_capture_response)
+
+    response = @gateway.capture(@amount + 1, '1234', @options)
     assert_success response
     assert_equal 'CI-635', response.authorization
     assert response.test?
@@ -89,8 +237,19 @@ class PaymentezTest < Test::Unit::TestCase
   def test_successful_refund
     @gateway.expects(:ssl_post).returns(successful_refund_response)
 
-    response = @gateway.refund(@amount, '1234', @options)
+    response = @gateway.refund(nil, '1234', @options)
     assert_success response
+    assert response.test?
+  end
+
+  def test_partial_refund
+    response = stub_comms do
+      @gateway.refund(@amount, '1234', @options)
+    end.check_request do |_endpoint, data, _headers|
+      assert_match(/"amount":1.0/, data)
+    end.respond_with(successful_refund_response)
+    assert_success response
+    assert_equal 'Completed', response.message
     assert response.test?
   end
 
@@ -99,6 +258,7 @@ class PaymentezTest < Test::Unit::TestCase
 
     response = @gateway.refund(@amount, '1234', @options)
     assert_failure response
+    assert_equal 'Invalid Status', response.message
     assert response.test?
   end
 
@@ -107,6 +267,7 @@ class PaymentezTest < Test::Unit::TestCase
 
     response = @gateway.void('1234', @options)
     assert_success response
+    assert_equal 'Completed', response.message
     assert response.test?
   end
 
@@ -114,6 +275,7 @@ class PaymentezTest < Test::Unit::TestCase
     @gateway.expects(:ssl_post).returns(failed_void_response)
 
     response = @gateway.void('1234', @options)
+    assert_equal 'Invalid Status', response.message
     assert_failure response
   end
 
@@ -125,11 +287,27 @@ class PaymentezTest < Test::Unit::TestCase
     assert_equal '14436664108567261211', response.authorization
   end
 
+  def test_simple_store_with_elo
+    @gateway.expects(:ssl_post).returns(successful_store_with_elo_response)
+
+    response = @gateway.store(@elo_credit_card, @options)
+    assert_success response
+    assert_equal '15550938907932827845', response.authorization
+  end
+
   def test_complex_store
     @gateway.stubs(:ssl_post).returns(already_stored_response, successful_unstore_response, successful_store_response)
 
     response = @gateway.store(@credit_card, @options)
     assert_success response
+  end
+
+  def test_paymentez_crashes_fail
+    @gateway.stubs(:ssl_post).returns(crash_response)
+
+    response = @gateway.purchase(@amount, @credit_card, @options)
+    assert_failure response
+    assert_equal Gateway::STANDARD_ERROR_CODE[:processing_error], response.error_code
   end
 
   def test_scrub
@@ -188,7 +366,7 @@ Conn close
   end
 
   def successful_purchase_response
-    %q(
+    '
       {
         "transaction": {
           "status": "success",
@@ -211,11 +389,39 @@ Conn close
           "number": "1111"
         }
       }
-    )
+    '
+  end
+
+  def successful_purchase_with_elo_response
+    '
+      {
+        "transaction": {
+          "status": "success",
+          "payment_date": "2019-03-06T16:47:13.430",
+          "amount": 1,
+          "authorization_code": "TEST00",
+          "installments": 1,
+          "dev_reference": "Testing",
+          "message": "Response by mock",
+          "carrier_code": null,
+          "id": "CI-14952",
+          "status_detail": 3
+        },
+        "card": {
+          "bin": "636297",
+          "expiry_year": "2020",
+          "expiry_month": "10",
+          "transaction_reference": "CI-14952",
+          "type": "el",
+          "number": "7013",
+          "origin": "Paymentez"
+        }
+      }
+    '
   end
 
   def failed_purchase_response
-    %q(
+    '
       {
         "transaction": {
           "status": "failure",
@@ -238,11 +444,11 @@ Conn close
           "number": "4242"
         }
       }
-    )
+    '
   end
 
   def successful_authorize_response
-    %q(
+    '
       {
         "transaction": {
           "status": "success",
@@ -267,29 +473,71 @@ Conn close
           "number": "1111"
         }
       }
-    )
+    '
+  end
+
+  def successful_authorize_with_elo_response
+    '
+      {
+        "transaction": {
+          "status": "success",
+          "payment_date": "2019-03-06T16:53:36.336",
+          "amount": 1,
+          "authorization_code": "TEST00",
+          "installments": 1,
+          "dev_reference": "Testing",
+          "message": "Response by mock",
+          "carrier_code": null,
+          "id": "CI-14953",
+          "status_detail": 0
+        },
+        "card": {
+          "bin": "636297",
+          "status": "",
+          "token": "",
+          "expiry_year": "2020",
+          "expiry_month": "10",
+          "transaction_reference": "CI-14953",
+          "type": "el",
+          "number": "7013",
+          "origin": "Paymentez"
+        }
+      }
+    '
   end
 
   def failed_authorize_response
-    %q(
-     {
+    '
+      {
+        "transaction": {
+          "status": "failure",
+          "payment_date": null,
+          "amount": 1.0,
+          "authorization_code": null,
+          "installments": 1,
+          "dev_reference": "Testing",
+          "message": null,
+          "carrier_code": "3",
+          "id": "CI-1223",
+          "status_detail": 9
+        },
         "card": {
           "bin": "424242",
-          "status": "rejected",
-          "token": "2026849624512750545",
-          "message": "Not Authorized",
-          "expiry_year": "2018",
+          "status": null,
+          "token": "6461587429110733892",
+          "expiry_year": "2019",
           "expiry_month": "9",
-          "transaction_reference": "CI-606",
+          "transaction_reference": "CI-1223",
           "type": "vi",
-          "number": "4242"
+          "number": "4242",
+          "origin": "Paymentez"
         }
       }
-    )
+    '
   end
 
   def successful_capture_response
-    %q(
+    '
       {
         "transaction": {
           "status": "success",
@@ -314,11 +562,41 @@ Conn close
           "number": "1111"
         }
       }
-    )
+    '
+  end
+
+  def successful_capture_with_elo_response
+    '
+      {
+        "transaction": {
+          "status": "success",
+          "payment_date": "2019-03-06T16:53:36",
+          "amount": 1,
+          "authorization_code": "TEST00",
+          "installments": 1,
+          "dev_reference": "Testing",
+          "message": "Response by mock",
+          "carrier_code": null,
+          "id": "CI-14953",
+          "status_detail": 3
+        },
+        "card": {
+          "bin": "636297",
+          "status": "",
+          "token": "",
+          "expiry_year": "2020",
+          "expiry_month": "10",
+          "transaction_reference": "CI-14953",
+          "type": "el",
+          "number": "7013",
+          "origin": "Paymentez"
+        }
+      }
+    '
   end
 
   def failed_capture_response
-    "{\"error\": {\"type\": \"Carrier not supported\", \"help\": \"\", \"description\": \"{}\"}}"
+    '{"error": {"type": "Carrier not supported", "help": "", "description": "{}"}}'
   end
 
   def successful_void_response
@@ -326,11 +604,11 @@ Conn close
   end
 
   def failed_void_response
-    '{"error": {"type": "Carrier not supported", "help": "", "description": "{}"}}'
+    '{"status": "failure", "detail": "Invalid Status"}'
   end
 
-  alias_method :successful_refund_response, :successful_void_response
-  alias_method :failed_refund_response, :failed_void_response
+  alias successful_refund_response successful_void_response
+  alias failed_refund_response failed_void_response
 
   def already_stored_response
     '{"error": {"type": "Card already added: 14436664108567261211", "help": "If you want to update the card, first delete it", "description": "{}"}}'
@@ -344,8 +622,12 @@ Conn close
     '{"card": {"bin": "411111", "status": "valid", "token": "14436664108567261211", "message": "", "expiry_year": "2018", "expiry_month": "9", "transaction_reference": "PR-959", "type": "vi", "number": "1111"}}'
   end
 
+  def successful_store_with_elo_response
+    '{"card": {"bin": "636297", "status": "valid", "token": "15550938907932827845", "message": "", "expiry_year": "2020", "expiry_month": "10", "transaction_reference": "CI-14956", "type": "el", "number": "7013", "origin": "Paymentez"}}'
+  end
+
   def failed_store_response
-    %q(
+    '
       {
         "card": {
           "bin": "424242",
@@ -359,6 +641,48 @@ Conn close
           "number": "4242"
         }
       }
-    )
+    '
+  end
+
+  def expired_card_response
+    '
+      {
+       "transaction":{
+          "status":"failure",
+          "payment_date":null,
+          "amount":1.0,
+          "authorization_code":null,
+          "installments":1,
+          "dev_reference":"ci123",
+          "message":"Expired card",
+          "carrier_code":"54",
+          "id":"PR-25",
+          "status_detail":9
+       },
+       "card":{
+          "bin":"528851",
+          "expiry_year":"2024",
+          "expiry_month":"4",
+          "transaction_reference":"PR-25",
+          "type":"mc",
+          "number":"9794",
+          "origin":"Paymentez"
+       }
+      }
+    '
+  end
+
+  def crash_response
+    '
+      <html>
+        <head>
+          <title>Internal Server Error</title>
+        </head>
+        <body>
+          <h1><p>Internal Server Error</p></h1>
+
+        </body>
+      </html>
+    '
   end
 end
